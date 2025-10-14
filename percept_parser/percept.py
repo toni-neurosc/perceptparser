@@ -123,25 +123,35 @@ class PerceptParser:
         #df = df.resample(f"{1/sfreq:.6f}S").mean()
         return df
 
-    def get_time_stream(self, js_td: dict, num_chs : int, verbose: bool = False) -> pd.DataFrame:
-        start_time = js_td['FirstPacketDateTime']
-        start_time = datetime.strptime(start_time, '%Y-%m-%dT%H:%M:%S.%fZ')
-        fs = js_td['SampleRateInHz']
-        TimeDomainData = np.array(js_td['TimeDomainData'])
-        TicksInMses = np.array([int(tick) for tick in js_td['TicksInMses'].split(",")[:-1]])
-        TicksDiff = np.diff(TicksInMses)
-        GlobalPacketSizes = np.array([int(size) for size in js_td['GlobalPacketSizes'].split(",")[:-1]])
-        GlobalSequences = np.array([int(seq) for seq in js_td['GlobalSequences'].split(",")[:-1]])
+    def get_time_stream(
+        self, data: dict, num_chs: int, verbose: bool = False
+    ) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+        """
+        Process a Streaming Sample object from the Percept JSON data
+        """
 
-        if sum(GlobalPacketSizes) != TimeDomainData.shape[0]:
+        start_time = datetime.fromisoformat(data["FirstPacketDateTime"])
+        fs = data["SampleRateInHz"]
+
+        TimeDomainData = np.array(data["TimeDomainData"])
+        GlobalPacketSizes = np.fromstring(data["GlobalPacketSizes"], sep=",", dtype=int)
+
+        if np.sum(GlobalPacketSizes) != TimeDomainData.shape[0]:
             raise ValueError("GlobalPacketSizes does not match TimeDomainData length")
 
-        df_i = pd.DataFrame({
-            "GlobalPacketSizes": GlobalPacketSizes,
-            "GlobalSequences": GlobalSequences,
-            "TicksInMsesDiff": np.concatenate([np.array([np.nan]), TicksDiff]),
-            "TicksInMses": TicksInMses,
-        })
+        GlobalSequences = np.fromstring(data["GlobalSequences"], sep=",", dtype=int)
+        TicksInMses = np.fromstring(data["TicksInMses"], sep=",", dtype=int)
+        TicksDiff = np.insert(np.diff(TicksInMses), 0, 0)
+
+        # Check that packages are sorteds
+        if not np.all(TicksInMses[:-1] <= TicksInMses[1:]):
+            raise ValueError(f"Packages in the wrong order")
+
+        num_packets = len(GlobalPacketSizes)
+        PacketLoss = TicksDiff / 1000 > (GlobalPacketSizes + 1) / fs
+
+        # This works without accounting for errors
+        RelativeTimes = (np.cumsum(GlobalPacketSizes - 1) + np.arange(num_packets)) / fs
 
         # if indefinite_streaming:
         #     # collapse df_i
@@ -151,55 +161,78 @@ class PerceptParser:
         un, counts = np.unique(TicksDiff, return_counts=True)
         df_counts = pd.DataFrame({'TicksDiff': un, 'Counts': counts})
 
-        tdtime = np.arange(0, df_i.iloc[0]["GlobalPacketSizes"]/fs, 1/fs)
-        t_cur = tdtime[-1]
+        # Get relative sample times for the first packet
+        tdtime = np.arange(0, GlobalPacketSizes[0]) / fs
+
+        t_cur = tdtime[-1] + (1 / fs)  # First timepoint of next package
+
+        last_times = [tdtime[-1]]
 
         l_tdtime = []
         l_tdtime.append(tdtime)
         PACKAGE_LOSS_PRESENT = False
-        for i in np.arange(1, df_i.shape[0], 1):
-            time_diff = df_i.iloc[i]["TicksInMsesDiff"] / 1000 # s
-            
+
+        for i in range(1, num_packets):
+            packet_size = GlobalPacketSizes[i]
+            time_diff = TicksDiff[i] / 1000  # s
+
             # for indefinite streaming with 6 chs diffs are 250
             # for brainsense time domain data there are two chs
             
             #if indefinite_streaming:
             #    time_diff = time_diff / 2  # split in sequence of half
+
             # if there are two channels, don't adapt time_diff
             if num_chs == 3:
                 time_diff = time_diff / 3  # here I don't know, 
             elif num_chs == 6:
                 time_diff = time_diff / 2
-            if time_diff < 0:
-                time_diff = np.unique(TicksDiff)[0] / 1000  # s, most freq value
 
-            td_time_packet = np.arange(0, df_i.iloc[i]["GlobalPacketSizes"]/fs, 1/fs)
+            # Is this even possible? If so, would need to reorder TimeDomainData
+            # if time_diff < 0:
+            #     time_diff = np.bincount(TicksDiff).argmax() / 1000  # most freq value
 
-            if time_diff > (df_i.iloc[i]["GlobalPacketSizes"] + 1) / fs:
+            # Get relative sample times for packet
+            td_time_packet = np.arange(0, packet_size) / fs
+
+            # t_cur is first time of this packet
+            if time_diff > (packet_size + 1) / fs:  # If packages missing
                 PACKAGE_LOSS_PRESENT = True
-                td_time_packet += t_cur + time_diff - td_time_packet[-1]
-            else:
+                # To get t_cur to first time of packet after adjusting for missing packets:
+                # 1. Revert t_cur to end of previous of package
+                # 2. Advance by time diff between packets
+                # 3. Go back by the duration of this packet
+                td_time_packet += (t_cur - 1 / fs) + time_diff - td_time_packet[-1]
+                # Note: this method is risky because time_diff is rounded to the 50ms
+                # Documentation suggests just using the TicksInMses values
+            else:  # If not missed packages
+                # print(t_cur + td_time_packet[-1]) # last absolute time of packet
                 td_time_packet += t_cur
-                if verbose:
-                    print(f"td_time_ shape: {td_time_packet.shape}")
-                    print(f"GlobalPacketSizes: {df_i.iloc[i]['GlobalPacketSizes']}\n")
-                if td_time_packet.shape[0] != df_i.iloc[i]["GlobalPacketSizes"]:
-                    raise ValueError(f"td_time_ shape {td_time_packet.shape} does not match GlobalPacketSizes {df_i.iloc[i]['GlobalPacketSizes']}")
-            
-            
-            t_cur = np.round(td_time_packet[-1] + 1/fs, decimals=3)
+                # print(RelativeTimes[i])
+
+            last_times.append(td_time_packet[-1])
+            t_cur = td_time_packet[-1] + (1 / fs)  # move to first time of next packet
             l_tdtime.append(td_time_packet)
             tdtime = np.concatenate([tdtime, td_time_packet])
+
+        # Check that calculation was correct by comapring to actual last value from TicksInMses
+        # print(
+        #     TicksInMses[-1] / 1000
+        #     - TicksInMses[0] / 1000
+        #     + (GlobalPacketSizes[0] - 1) / fs
+        # )
         
         if tdtime.shape[0] != TimeDomainData.shape[0]:
             raise ValueError(f"tdtime shape {tdtime.shape} does not match TimeDomainData shape {TimeDomainData.shape}") 
 
-        td_ = pd.to_timedelta(tdtime, unit='s') + pd.Timestamp(start_time)
-        ch_ = js_td['Channel']
-        df_ch = pd.DataFrame({
-            "Time": td_,
-            "Data": TimeDomainData,
-        })
+        td_ = pd.to_timedelta(tdtime, unit="s") + pd.Timestamp(start_time)
+        ch_ = data["Channel"]
+        df_ch = pd.DataFrame(
+            {
+                "Time": td_,
+                "Data": TimeDomainData,
+            }
+        )
         df_ch = df_ch.set_index("Time")
 
         df_ch = df_ch.resample(f"{int(1000/fs)}ms").mean()
@@ -228,29 +261,46 @@ class PerceptParser:
             print(f"No {str_timedomain} found in the JSON file.")
             return []
 
-        FirstPackageDateTimes = np.array([self.js[str_timedomain][index_]['FirstPacketDateTime'] 
-                                          for index_ in range(len(self.js[str_timedomain]))])
-        num_chs = np.where(FirstPackageDateTimes == FirstPackageDateTimes[0])[0].shape[0]
+        td_data = self.js[str_timedomain]
+
+        # Each channel has its own "Streaming Sample" data structure
+        # We can identify each recording session by the first data packet timestamp
+        first_packet_times = np.unique(
+            [stream["FirstPacketDateTime"] for stream in td_data]
+        )
+
+        channels = np.unique([stream["Channel"] for stream in td_data])
 
         df_ = []
-        for package_idx, first_package in tqdm(list(enumerate(np.unique(FirstPackageDateTimes))),
+        for package_idx, first_package in tqdm(list(enumerate(np.unique(first_packet_times))),
                                                desc=f"{str_timedomain} Index"):
             df_counts_sum = []
             df_chs = []
-            idx_package_chs = np.where(FirstPackageDateTimes == first_package)[0]
-            for pkg_ch_idx in idx_package_chs:
+            for session_idx in np.where(first_packet_times == first_package)[0]:
                 df_ch, df_counts, PACKAGE_LOSS_PRESENT = self.get_time_stream(
-                    js_td=self.js[str_timedomain][pkg_ch_idx],
-                    num_chs=num_chs,
+                    data=td_data[session_idx],
+                    num_chs=len(channels),  # Why is this param needed?
                     verbose=False,
                 )
-                df_counts["file_idx"] = package_idx
-                df_counts_sum.append(df_counts)
                 df_chs.append(df_ch)
+                # These are currently unused
+                # df_counts["file_idx"] = session_idx
+                # df_counts_sum.append(df_counts)
+
+            # Alternatively
+            # df_ch = [
+            #     self.get_time_stream(
+            #         js_td=td_data[session_idx],
+            #         num_chs=len(channels),  # Why is this param needed?
+            #         verbose=False,
+            #     )[0]
+            #     for session_idx in np.where(first_packet_times == first_datetime)[0]
+            # ]
 
             df_concat = pd.concat(df_chs, axis=0)
             df_concat = df_concat.reset_index().pivot(index='Time', columns='Channel', values='Data')
             df_.append(df_concat)
+
         return df_
 
     # def read_brainsense_timedomain(self, ) -> pd.DataFrame:
