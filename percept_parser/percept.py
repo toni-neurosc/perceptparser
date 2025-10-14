@@ -202,9 +202,14 @@ class PerceptParser:
                 # 1. Revert t_cur to end of previous of package
                 # 2. Advance by time diff between packets
                 # 3. Go back by the duration of this packet
-                td_time_packet += (t_cur - 1 / fs) + time_diff - td_time_packet[-1]
+                # td_time_packet += (t_cur - 1 / fs) + time_diff - td_time_packet[-1]
                 # Note: this method is risky because time_diff is rounded to the 50ms
                 # Documentation suggests just using the TicksInMses values
+                td_time_packet += (
+                    ((TicksInMses[i] - TicksInMses[0]) / 1000)
+                    + (GlobalPacketSizes[0] - 1) / fs
+                    - (packet_size - 1) / fs
+                )
             else:  # If not missed packages
                 # print(t_cur + td_time_packet[-1]) # last absolute time of packet
                 td_time_packet += t_cur
@@ -216,12 +221,13 @@ class PerceptParser:
             tdtime = np.concatenate([tdtime, td_time_packet])
 
         # Check that calculation was correct by comapring to actual last value from TicksInMses
-        # print(
-        #     TicksInMses[-1] / 1000
-        #     - TicksInMses[0] / 1000
-        #     + (GlobalPacketSizes[0] - 1) / fs
-        # )
-        
+        print(
+            f"Last value: {
+                (TicksInMses[-1] - TicksInMses[0]) / 1000
+                + (GlobalPacketSizes[0] - 1) / fs
+            }"
+        )
+
         if tdtime.shape[0] != TimeDomainData.shape[0]:
             raise ValueError(f"tdtime shape {tdtime.shape} does not match TimeDomainData shape {TimeDomainData.shape}") 
 
