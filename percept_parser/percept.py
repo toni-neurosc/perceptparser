@@ -139,7 +139,7 @@ class PerceptParser:
         if np.sum(GlobalPacketSizes) != TimeDomainData.shape[0]:
             raise ValueError("GlobalPacketSizes does not match TimeDomainData length")
 
-        GlobalSequences = np.fromstring(data["GlobalSequences"], sep=",", dtype=int)
+        # GlobalSequences = np.fromstring(data["GlobalSequences"], sep=",", dtype=int)
         TicksInMses = np.fromstring(data["TicksInMses"], sep=",", dtype=int)
         TicksDiff = np.insert(np.diff(TicksInMses), 0, 0)
 
@@ -148,10 +148,10 @@ class PerceptParser:
             raise ValueError(f"Packages in the wrong order")
 
         num_packets = len(GlobalPacketSizes)
-        PacketLoss = TicksDiff / 1000 > (GlobalPacketSizes + 1) / fs
+        # PacketLoss = TicksDiff / 1000 > (GlobalPacketSizes + 1) / fs
 
         # This works without accounting for errors
-        RelativeTimes = (np.cumsum(GlobalPacketSizes - 1) + np.arange(num_packets)) / fs
+        # RelativeTimes = (np.cumsum(GlobalPacketSizes - 1) + np.arange(num_packets)) / fs
 
         # if indefinite_streaming:
         #     # collapse df_i
@@ -164,7 +164,7 @@ class PerceptParser:
         # Get relative sample times for the first packet
         tdtime = np.arange(0, GlobalPacketSizes[0]) / fs
 
-        t_cur = tdtime[-1] + (1 / fs)  # First timepoint of next package
+        t_cur = tdtime[-1] + (1 / fs)  # First timepoint of 2nd package
 
         last_times = [tdtime[-1]]
 
@@ -211,9 +211,7 @@ class PerceptParser:
                     - (packet_size - 1) / fs
                 )
             else:  # If not missed packages
-                # print(t_cur + td_time_packet[-1]) # last absolute time of packet
-                td_time_packet += t_cur
-                # print(RelativeTimes[i])
+                td_time_packet += t_cur # Just offset relative times by start time
 
             last_times.append(td_time_packet[-1])
             t_cur = td_time_packet[-1] + (1 / fs)  # move to first time of next packet
@@ -221,12 +219,13 @@ class PerceptParser:
             tdtime = np.concatenate([tdtime, td_time_packet])
 
         # Check that calculation was correct by comapring to actual last value from TicksInMses
-        print(
-            f"Last value: {
-                (TicksInMses[-1] - TicksInMses[0]) / 1000
-                + (GlobalPacketSizes[0] - 1) / fs
-            }"
-        )
+        # By using TicksInMses to calculate times in the lost package case, fits perfectly
+        # print(
+        #     f"Last value: {
+        #         (TicksInMses[-1] - TicksInMses[0]) / 1000
+        #         + (GlobalPacketSizes[0] - 1) / fs
+        #     }"
+        # )
 
         if tdtime.shape[0] != TimeDomainData.shape[0]:
             raise ValueError(f"tdtime shape {tdtime.shape} does not match TimeDomainData shape {TimeDomainData.shape}") 
