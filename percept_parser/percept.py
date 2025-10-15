@@ -257,14 +257,14 @@ class PerceptParser:
         return df_ch, df_counts, PACKAGE_LOSS_PRESENT
 
     def read_timedomain_data(self, indefinite_streaming: bool = True) -> pd.DataFrame:
-
-        if indefinite_streaming:
-            str_timedomain = "IndefiniteStreaming"
-        else:
-            str_timedomain = "BrainSenseTimeDomain"
+        str_timedomain = (
+            "IndefiniteStreaming" if indefinite_streaming else "BrainSenseTimeDomain"
+        )
         if str_timedomain not in self.js:
             print(f"No {str_timedomain} found in the JSON file.")
-            return []
+            return pd.DataFrame()
+
+        td_data = self.js[str_timedomain]
 
         td_data = self.js[str_timedomain]
 
